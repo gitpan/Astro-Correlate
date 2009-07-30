@@ -93,17 +93,22 @@ sub correlate {
 # Grab the arguments, and make sure they're defined and are
 # Astro::Catalog objects (the catalogues, at least).
   my %args = @_;
-  my $cat1 = dclone( $args{'catalog1'} );
-  my $cat2 = dclone( $args{'catalog2'} );
+  my $inputcat1 = dclone( $args{'catalog1'} );
+  my $inputcat2 = dclone( $args{'catalog2'} );
 
-  if( ! defined( $cat1 ) ||
-      ! UNIVERSAL::isa( $cat1, "Astro::Catalog" ) ) {
+  if( ! defined( $inputcat1 ) ||
+      ! UNIVERSAL::isa( $inputcat1, "Astro::Catalog" ) ) {
     croak "catalog1 parameter to correlate method must be defined and must be an Astro::Catalog object";
   }
-  if( ! defined( $cat2 ) ||
-      ! UNIVERSAL::isa( $cat2, "Astro::Catalog" ) ) {
+  if( ! defined( $inputcat2 ) ||
+      ! UNIVERSAL::isa( $inputcat2, "Astro::Catalog" ) ) {
     croak "catalog2 parameter to correlate method must be defined and must be an Astro::Catalog object";
   }
+
+  # Make deep clones of the two input catalogues so we can modify IDs
+  # and not trample those input catalogues.
+  my $cat1 = dclone( $inputcat1 );
+  my $cat2 = dclone( $inputcat2 );
 
   my $keeptemps = defined( $args{'keeptemps'} ) ? $args{'keeptemps'} : 0;
   my $temp;
@@ -136,37 +141,37 @@ sub correlate {
   ( undef, my $catfile1 ) = tempfile( DIR => $temp );
   ( undef, my $catfile2 ) = tempfile( DIR => $temp );
 
+# Create two hash lookup tables. Key will be an integer incrementing
+# from 1, value will be the original ID. We have to renumber because
+# some modern catalogues have star IDs where the integer part exceeds
+# a 32-bit integer (as used by FINDOFF)
+  my %lookup_cat1;
+  my %lookup_cat2;
+
+  my $cat1stars = $cat1->stars;
+  my $newid = 1;
+  foreach my $cat1star ( @$cat1stars ) {
+    $lookup_cat1{$newid} = $cat1star->id;
+    print "Catalogue 1 star with original ID of " . $cat1star->id . " has FINDOFF-ed ID of $newid\n" if $DEBUG;
+    $cat1star->id( $newid );
+    $newid++;
+  }
+
+  my $cat2stars = $cat2->stars;
+  $newid = 1;
+  foreach my $cat2star ( @$cat2stars ) {
+    $lookup_cat2{$newid} = $cat2star->id;
+    print "Catalogue 2 star with original ID of " . $cat2star->id . " has FINDOFF-ed ID of $newid\n" if $DEBUG;
+    $cat2star->id( $newid );
+    $newid++;
+  }
+
 # We need to write two input files for FINDOFF, one for each catalogue.
 # Do so using Astro::Catalog.
   $cat1->write_catalog( Format => 'FINDOFF', File => $catfile1 );
   $cat2->write_catalog( Format => 'FINDOFF', File => $catfile2 );
   print "Input catalog 1 written to $catfile1.\n" if $DEBUG;
   print "Input catalog 2 written to $catfile2.\n" if $DEBUG;
-
-# Create two hash lookup tables. Key will be the "FINDOFF-ed" ID,
-# which is the original ID with all non-numeric characters removed,
-# and value will be the original ID. This will allow us to match up
-# stars after the correlation has happened.
-  my %lookup_cat1;
-  my %lookup_cat2;
-
-  my $cat1stars = $cat1->stars;
-  foreach my $cat1star ( @$cat1stars ) {
-    my $newid = $cat1star->id;
-    $newid =~ s/[^\d]//g;
-    $newid = int( $newid );
-    $lookup_cat1{$newid} = $cat1star->id;
-    print "Catalogue 1 star with original ID of " . $cat1star->id . " has FINDOFF-ed ID of $newid\n" if $DEBUG;
-  }
-
-  my $cat2stars = $cat2->stars;
-  foreach my $cat2star ( @$cat2stars ) {
-    my $newid = $cat2star->id;
-    $newid =~ s/[^\d]//g;
-    $newid = int( $newid );
-    $lookup_cat2{$newid} = $cat2star->id;
-    print "Catalogue 2 star with original ID of " . $cat2star->id . " has FINDOFF-ed ID of $newid\n" if $DEBUG;
-  }
 
 # We need to write an input file for FINDOFF that lists the above two
 # input files.
@@ -185,14 +190,14 @@ sub correlate {
                              $ENV{'HOME'} . "/adam/corr" );
 
   my @findoffargs = ( "ndfnames=false",
-                      "error=5",
+                      "error=2",
                       "maxdisp=!",
                       "minsep=5",
                       "fast=yes",
                       "failsafe=yes",
                       "logto=neither",
                       "namelist=!",
-                      "complete=0.15",
+                      "complete=0.05",
                       "inlist=^$findoff_input",
                       "outlist='*.off'" );
 
@@ -203,7 +208,7 @@ sub correlate {
     $ams->messages( $messages );
   }
   if( ! defined( $TASK ) ) {
-    $TASK = new Starlink::AMS::Task( "findoff", "/star/bin/ccdpack/findoff" );
+    $TASK = new Starlink::AMS::Task( "findoff", "$findoff_bin" );
   }
   my $STATUS = $TASK->contactw;
   if( ! $STATUS ) {
@@ -238,7 +243,7 @@ sub correlate {
     my $oldid = $lookup_cat1{$oldfindoffid};
 
 # Get the star's information.
-    my $oldstar = $cat1->popstarbyid( $oldid );
+    my $oldstar = $inputcat1->popstarbyid( $oldid );
     $oldstar = $oldstar->[0];
     next if ! defined( $oldstar );
 
@@ -264,6 +269,7 @@ sub correlate {
 # a combination of the new ID and the old information.
   my $corrcat2 = new Astro::Catalog();
   @stars = $tempcat->stars;
+
   foreach my $star ( @stars ) {
 
 # The old ID is found in the first column of the star's comment.
@@ -275,7 +281,7 @@ sub correlate {
     my $oldid = $lookup_cat2{$oldfindoffid};
 
 # Get the star's information.
-    my $oldstar = $cat2->popstarbyid( $oldid );
+    my $oldstar = $inputcat2->popstarbyid( $oldid );
     $oldstar = $oldstar->[0];
     next if ! defined( $oldstar );
 
@@ -311,7 +317,7 @@ Starlink User Note 139.
 
 =head1 REVISION
 
-$Id: FINDOFF.pm,v 1.19 2006/04/01 00:40:59 bradc Exp $
+$Id$
 
 =head1 AUTHORS
 

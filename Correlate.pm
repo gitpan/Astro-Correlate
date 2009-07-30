@@ -27,7 +27,7 @@ use warnings::register;
 use Carp;
 use File::Temp qw/ tempdir /;
 
-our $VERSION = '0.01';
+our $VERSION = '1.0';
 
 =head1 METHODS
 
@@ -426,7 +426,7 @@ sub _load_corr_plugin {
 
 =head1 REVISION
 
-$Id: Correlate.pm,v 1.10 2006/04/01 00:39:34 bradc Exp $
+$Id$
 
 =head1 AUTHORS
 

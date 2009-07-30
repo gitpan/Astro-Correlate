@@ -25,7 +25,7 @@ use File::Temp qw/ tempfile /;
 use File::SearchPath qw/ searchpath /;
 use Storable qw/ dclone /;
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 our $DEBUG = 0;
 
 =head1 METHODS
@@ -67,8 +67,7 @@ catalogue.
 method will keep temporary files used in processing. Defaults to
 false.
 
-=item messages - If set to true (1), then this method will print
-messages from the FINDOFF task during processing. Defaults to false.
+=item messages - no effect.
 
 =item temp - Set the directory to hold temporary files. If not set,
 then a new temporary directory will be created using File::Temp.
@@ -109,6 +108,9 @@ sub correlate {
         ;
   }
 
+# Retrieve the scaling factor.
+  my $scale = _determine_scaling_factor( $cat1, $cat2 );
+
   my $keeptemps = defined( $args{'keeptemps'} ) ? $args{'keeptemps'} : 0;
   my $temp;
   if( exists( $args{'temp'} ) && defined( $args{'temp'} ) ) {
@@ -141,6 +143,21 @@ sub correlate {
   ( undef, my $catfile1 ) = tempfile( DIR => $temp );
   ( undef, my $catfile2 ) = tempfile( DIR => $temp );
 
+# Match is sensitive to the scaling of the problem, requiring that the
+# error is of order 1, and certainly less than 50. To meet this requirement
+# scale the X and Y coordinates to have a range of 200 (XXX make this some
+# multiple of the image scale).
+  my $cat1stars = $cat1->stars;
+  foreach my $cat1star ( @$cat1stars ) {
+    $cat1star->x( $cat1star->x() / $scale );
+    $cat1star->y( $cat1star->y() / $scale );
+  }
+  my $cat2stars = $cat2->stars;
+  foreach my $cat2star ( @$cat2stars ) {
+    $cat2star->x( $cat2star->x() / $scale );
+    $cat2star->y( $cat2star->y() / $scale );
+  }
+
 # Write the two input catalogues for match.
   print "Writing catalog 1 to $catfile1 using $cat1magtype magnitude.\n" if $DEBUG;
   $cat1->write_catalog( Format => 'RITMatch',
@@ -152,6 +169,27 @@ sub correlate {
                         File => $catfile2,
                         mag_type => $cat2magtype );
   print "Input catalog 2 written to $catfile2.\n" if $DEBUG;
+
+# Create two hash lookup tables. Key will be the "match-ed" ID, which
+# is the original ID with all non-numeric characters removed, and
+# value will be the original ID. This will allow us to match up stars
+# after the correlation has happened.
+  my %lookup_cat1;
+  my %lookup_cat2;
+
+  $cat1stars = $cat1->stars;
+  my $newid = 1;
+  foreach my $cat1star ( @$cat1stars ) {
+    $lookup_cat1{$newid} = $cat1star->id;
+    $newid++;
+  }
+
+  $cat2stars = $cat2->stars;
+  $newid = 1;
+  foreach my $cat2star ( @$cat2stars ) {
+    $lookup_cat2{$newid} = $cat2star->id;
+    $newid++;
+  }
 
 # Create a base filename for the output catalogues. Put it in the
 # temporary directory previously set up.
@@ -185,15 +223,35 @@ sub correlate {
 # a combination of the new ID and the old information.
   my $corrcat1 = new Astro::Catalog();
   my @stars = $tempcat->stars;
-  my $newid = 1;
+  $newid = 1;
   foreach my $star ( @stars ) {
 
-    my $id = $star->id;
-    my $oldstar1 = $cat1->popstarbyid( $id );
-    $oldstar1 = $oldstar1->[0];
-    next if ! defined( $oldstar1 );
-    $oldstar1->id( $newid );
-    $corrcat1->pushstar( $oldstar1 );
+# The old ID is found in the first column of the star's comment.
+# However, this old ID has been "match-ed", i.e. all non-numeric
+# characters have been stripped from it. Use the lookup table we
+# generated earlier to find the proper old ID.
+    $star->id =~ /^(\w+)/;
+    my $oldmatchid = $1;
+    my $oldid = $lookup_cat1{$oldmatchid};
+
+# Get the star's information.
+    my $oldstar = $cat1->popstarbyid( $oldid );
+    $oldstar = $oldstar->[0];
+    next if ! defined( $oldstar );
+
+# Set the ID to the new star's ID.
+    $oldstar->id( $newid );
+
+# Restore X and Y.
+    $oldstar->x( $oldstar->x() * $scale );
+    $oldstar->y( $oldstar->y() * $scale );
+
+# Set the comment denoting the old ID.
+    $oldstar->comment( "Old ID: " . $oldid );
+
+# And push this star onto the output catalogue.
+    $corrcat1->pushstar( $oldstar );
+
     $newid++;
   }
 
@@ -205,12 +263,33 @@ sub correlate {
   @stars = $tempcat->stars;
   $newid = 1;
   foreach my $star ( @stars ) {
-    my $id = $star->id;
-    my $oldstar2 = $cat2->popstarbyid( $id );
-    $oldstar2 = $oldstar2->[0];
-    next if ! defined( $oldstar2 );
-    $oldstar2->id( $newid );
-    $corrcat2->pushstar( $oldstar2 );
+
+# The old ID is found in the first column of the star's comment.
+# However, this old ID has been "match-ed", i.e. all non-numeric
+# characters have been stripped from it. Use the lookup table we
+# generated earlier to find the proper old ID.
+    $star->id =~ /^(\w+)/;
+    my $oldmatchid = $1;
+    my $oldid = $lookup_cat2{$oldmatchid};
+
+# Get the star's information.
+    my $oldstar = $cat2->popstarbyid( $oldid );
+    $oldstar = $oldstar->[0];
+    next if ! defined( $oldstar );
+
+# Set the ID to the new star's ID.
+    $oldstar->id( $newid );
+
+# Restore X and Y.
+    $oldstar->x( $oldstar->x() * $scale );
+    $oldstar->y( $oldstar->y() * $scale );
+
+# Set the comment denoting the old ID.
+    $oldstar->comment( "Old ID: " . $oldid );
+
+# And push this star onto the output catalogue.
+    $corrcat2->pushstar( $oldstar );
+
     $newid++;
   }
 
@@ -229,6 +308,46 @@ sub correlate {
 
 =back
 
+=head2 Private Methods
+
+=over 4
+
+=item B<_determine_scaling_factor>
+
+match v0.09 and above had a requirement (or strong suggestion) that
+coordinate values be less than about 5000. Testing has shown that this
+limit is closer to about 1000, so this method looks at all of the
+coordinate values in the two catalogues and determines a scaling
+factor to bring those coordinate values under 1000.
+
+  my $factor = _determine_scaling_factor( $cat1, $cat2 );
+
+=cut
+
+sub _determine_scaling_factor {
+  my $cat1 = shift;
+  my $cat2 = shift;
+
+  my $max = 0;
+  my $max_pos = 500;
+
+  foreach my $cat ( ( $cat1, $cat2 ) ) {
+    foreach my $item ( $cat->stars ) {
+      if( $item->x > $max ) {
+        $max = $item->x;
+      }
+      if( $item->y > $max ) {
+        $max = $item->y;
+      }
+    }
+  }
+
+  my $scale = ( $max > $max_pos ? $max / $max_pos : 1 );
+
+  return $scale;
+
+}
+
 =head1 SEE ALSO
 
 C<Astro::Correlate>
@@ -237,7 +356,7 @@ http://spiff.rit.edu/match/
 
 =head1 REVISION
 
-$Id: RITMatch.pm,v 1.3 2006/04/01 00:47:57 bradc Exp $
+$Id$
 
 =head1 AUTHORS
 
